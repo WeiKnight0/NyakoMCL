@@ -1,0 +1,18 @@
+# Local builds and deployment
+/build*/
+/dist/
+/.qtcreator/
+
+# Downloaded game files and local verification data
+/game-data/
+/test-game-data/
+/verification-*/
+/manifest.json
+/version-inspect.json
+
+# Generated Qt/CMake files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.user
+*.log
