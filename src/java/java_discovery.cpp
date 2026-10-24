@@ -23,7 +23,8 @@ void appendChildren(QStringList &paths, const QString &parent) {
     for (const QFileInfo &entry : dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot)) {
         paths << QDir(entry.absoluteFilePath()).filePath("bin/" + executableName());
 #ifdef Q_OS_MACOS
-        paths << QDir(entry.absoluteFilePath()).filePath("Contents/Home/bin/java");
+        paths << QDir(entry.absoluteFilePath()).filePath("Contents/Home/bin/java")
+              << QDir(entry.absoluteFilePath()).filePath("jre.bundle/Contents/Home/bin/java");
 #endif
     }
 }
@@ -35,19 +36,30 @@ QString JavaRuntime::label(int requiredMajor) const {
              requiredMajor && !compatible(requiredMajor) ? QString("  [需要 Java %1]").arg(requiredMajor) : QString());
 }
 
-JavaRuntime inspectJava(const QString &path) {
+JavaRuntime inspectJava(const QString &path, const std::atomic_bool *cancel) {
+    if (cancel && *cancel) return {};
     QFileInfo info(path);
     if (!info.isFile() || !info.isExecutable()) return {};
     JavaRuntime runtime;
     runtime.path = info.canonicalFilePath();
     if (runtime.path.isEmpty()) return {};
+    // 探测进程在调用线程创建和回收；短间隔等待让取消生效，避免一个失响应 Java 阻塞整批扫描。
     QProcess process;
     process.start(runtime.path, {"-version"});
-    if (!process.waitForStarted(2500)) return {};
-    if (!process.waitForFinished(5000)) {
-        process.kill();
-        process.waitForFinished(1000);
-        return {};
+    for (int elapsed = 0; process.state() == QProcess::Starting; elapsed += 50) {
+        if ((cancel && *cancel) || elapsed >= 2500) {
+            process.kill(); process.waitForFinished(1000); return {};
+        }
+        process.waitForStarted(50);
+    }
+    if (process.error() == QProcess::FailedToStart) return {};
+    for (int elapsed = 0; process.state() != QProcess::NotRunning; elapsed += 50) {
+        if ((cancel && *cancel) || elapsed >= 5000) {
+            process.kill();
+            process.waitForFinished(1000);
+            return {};
+        }
+        process.waitForFinished(50);
     }
     if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) return {};
     const QString output = QString::fromLocal8Bit(process.readAllStandardError() + process.readAllStandardOutput());
@@ -61,8 +73,9 @@ JavaRuntime inspectJava(const QString &path) {
     return runtime;
 }
 
-QList<JavaRuntime> discoverJava(const QString &preferredPath) {
+QList<JavaRuntime> discoverJava(const QString &preferredPath, const std::atomic_bool *cancel) {
     QStringList candidates;
+    appendChildren(candidates, QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).filePath("runtime"));
     if (!preferredPath.isEmpty()) candidates << preferredPath;
     const auto environment = QProcessEnvironment::systemEnvironment();
     const QString home = environment.value("JAVA_HOME");
@@ -90,11 +103,12 @@ QList<JavaRuntime> discoverJava(const QString &preferredPath) {
     QList<JavaRuntime> result;
     QSet<QString> seen;
     for (const QString &candidate : candidates) {
+        if (cancel && *cancel) break;
         QFileInfo info(candidate);
         const QString key = info.canonicalFilePath();
         if (key.isEmpty() || seen.contains(key)) continue;
         seen.insert(key);
-        JavaRuntime runtime = inspectJava(candidate);
+        JavaRuntime runtime = inspectJava(candidate, cancel);
         if (runtime.major > 0) result << runtime;
     }
     return result;

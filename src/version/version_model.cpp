@@ -24,6 +24,8 @@ QString osName() {
 }
 QString archName() { return sizeof(void *) == 8 ? "x64" : "x86"; }
 bool sha(const QString &value) { return QRegularExpression("^[a-fA-F0-9]{40}$").match(value).hasMatch(); }
+// 缺少 rules 默认允许；存在规则时默认拒绝，由最后一条匹配规则决定。
+// 未支持的结构直接拒绝；当前离线模式不启用 features 中声明的任何功能。
 bool rulesAllow(const QJsonValue &value, bool &allowed) {
     allowed = true;
     if (value.isUndefined()) return true;
@@ -66,6 +68,7 @@ Download descriptor(const QJsonObject &object, const QString &path) {
     return {object.value("url").toString(), object.value("sha1").toString(), path,
             object.value("size").isDouble() ? qint64(object.value("size").toDouble()) : -1};
 }
+// 未知占位符必须失败，不能将未展开的元数据传给 JVM；列表元素保持独立，不经 shell 拼接。
 bool argumentValues(const QJsonArray &array, const QMap<QString, QString> &vars, QStringList &out) {
     auto append = [&](const QJsonValue &value) {
         if (!value.isString()) return false;
@@ -218,6 +221,7 @@ FileStatus evaluatePlan(const VersionPlan &plan, const std::atomic_bool *cancel,
         ++status.checked;
         if (progress) progress(status.checked, plan.files.size() + plan.archives.size());
     }
+    // ZIP 本体的 SHA-1 正确仍不足以证明 native 可用，还需按中央目录逐项核对解压文件的长度与 CRC。
     for (const auto &archive : plan.archives) {
         if (cancel && *cancel) break;
         QFile file(archive.file.path);
@@ -255,6 +259,7 @@ FileStatus evaluatePlan(const VersionPlan &plan, const std::atomic_bool *cancel,
         ++status.checked;
         if (progress) progress(status.checked, plan.files.size() + plan.archives.size());
     }
+    status.cancelled = cancel && *cancel;
     return status;
 }
 
@@ -272,7 +277,7 @@ bool launchArguments(const VersionPlan &plan, const QString &name, QStringList &
         {"assets_root", QDir(plan.root).filePath("assets")}, {"assets_index_name", version.value("assetIndex").toObject().value("id").toString()},
         {"auth_uuid", offlineUuid(name)}, {"auth_access_token", "0"}, {"clientid", ""}, {"auth_xuid", ""},
         {"user_type", "legacy"}, {"version_type", "release"}, {"natives_directory", plan.natives},
-        {"launcher_name", "PCLQt"}, {"launcher_version", "1.0"}, {"classpath", plan.classpath.join(QDir::listSeparator())}
+        {"launcher_name", "NyakoMCL"}, {"launcher_version", "1.0"}, {"classpath", plan.classpath.join(QDir::listSeparator())}
     };
     arguments.clear();
     const auto source = version.value("arguments").toObject();

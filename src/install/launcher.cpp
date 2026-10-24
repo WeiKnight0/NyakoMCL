@@ -1,4 +1,5 @@
 #include "launcher.h"
+#include "java/java_runtime_provider.h"
 
 #include <QCryptographicHash>
 #include <QtConcurrent>
@@ -22,10 +23,72 @@ quint32 u32(const QByteArray &bytes, int offset) { return qFromLittleEndian<quin
 Installer::Installer(QString root, QString id, QObject *parent)
     : QThread(parent), root_(QDir(root).absolutePath()), id_(std::move(id)) {}
 void Installer::cancel() { cancelled_ = true; }
+void Installer::prepareLaunch(QString player, QString preferred, QString runtimeRoot) {
+    launching_ = true;
+    player_ = std::move(player);
+    preferred_ = std::move(preferred);
+    runtimeRoot_ = std::move(runtimeRoot);
+}
 void Installer::run() {
+    // QThread 对象仍属于创建线程；网络对象必须在 run 的工作线程内创建，不能跨线程复用。
+    // completed 仅表示业务结果已写入，控制器等待 finished 后才读取结果并启动主线程游戏进程。
     QNetworkAccessManager network;
-    const bool success = install(network);
-    emit completed(success, success ? id_ + " 安装校验完成" : cancelled_ ? "已取消" : error_);
+    stage_ = launching_ ? "检查文件" : "安装 / 修复";
+    success_ = launching_ ? prepare(network) : install(network);
+    message_ = cancelled_ ? "已取消" : success_ ? id_ + (launching_ ? " 启动准备完成" : " 安装校验完成") : stage_ + "失败：" + error_;
+    emit completed(success_ && !cancelled_, message_);
+}
+bool Installer::prepare(QNetworkAccessManager &network) {
+    emit progress(0, 0, stage_);
+    result_ = inspectVersion(root_, id_, false, [this](int done, int total) {
+        if (done == 1 || done == total || done % 100 == 0) emit progress(done, total, stage_);
+    }, &cancelled_);
+    if (cancelled_) return false;
+    if (!result_.installed) {
+        stage_ = "修复文件";
+        emit progress(0, 0, stage_);
+        if (!install(network)) return false;
+    }
+    stage_ = "查找兼容 Java";
+    emit progress(0, 0, stage_);
+    runtime_ = inspectJava(preferred_, &cancelled_);
+    if (!runtime_.compatible(result_.plan.javaMajor)) {
+        for (const auto &candidate : discoverJava({}, &cancelled_)) {
+            if (candidate.compatible(result_.plan.javaMajor)) { runtime_ = candidate; break; }
+        }
+    }
+    if (cancelled_) return false;
+    if (!runtime_.compatible(result_.plan.javaMajor)) {
+        stage_ = "下载官方 Java";
+        emit progress(0, 0, stage_);
+        runtime_ = provideJava(result_.plan.metadata.value("javaVersion").toObject(), runtimeRoot_,
+            [this, &network](const QString &url, const QString &path, const QString &sha) { return fetchMetadata(network, url, path, sha); },
+            [this](const QList<Download> &files) { return fetchFiles(files); }, cancelled_, error_,
+            [this](const QString &stage) { emit progress(0, 0, stage); });
+        if (!runtime_.compatible(result_.plan.javaMajor)) return false;
+    }
+    stage_ = "生成启动参数";
+    emit progress(0, 0, stage_);
+    return !cancelled_ && launchArguments(result_.plan, player_, arguments_, error_);
+}
+bool Installer::fetchFiles(const QList<Download> &files) {
+    failed_ = false;
+    error_.clear();
+    total_ = files.size();
+    done_ = 0;
+    // 每个池任务创建自己的网络管理器；共享计数使用原子量，首个错误文本受互斥锁保护。
+    // 等待整批任务退出后才返回，避免 Installer 结果发布时仍有下载写入。
+    QThreadPool pool;
+    pool.setMaxThreadCount(16);
+    auto future = QtConcurrent::mappedReduced(&pool, files, [this](const Download &item) {
+        QNetworkAccessManager manager;
+        const bool success = fetch(item, manager);
+        if (!success) failed_ = true;
+        return success;
+    }, [](bool &failures, bool success) { failures = failures || !success; },
+    QtConcurrent::UnorderedReduce | QtConcurrent::SequentialReduce);
+    future.waitForFinished();
+    return !future.result() && !cancelled_ && !failed_;
 }
 
 bool Installer::valid(const Download &item) const {
@@ -56,7 +119,8 @@ bool Installer::fetch(const Download &item, QNetworkAccessManager &network) {
             return false;
         }
     }
-    for (int attempt = 1; attempt <= 3 && !cancelled_; ++attempt) {
+    // 边接收边累计长度与 SHA-1，只有全部匹配才提交 QSaveFile；失败/取消不发布半个文件。
+    for (int attempt = 1; attempt <= 3 && !cancelled_ && !failed_; ++attempt) {
         QSaveFile output(item.path);
         if (!output.open(QIODevice::WriteOnly)) {
             QMutexLocker lock(&errorMutex_);
@@ -83,13 +147,15 @@ bool Installer::fetch(const Download &item, QNetworkAccessManager &network) {
         };
         connect(reply, &QIODevice::readyRead, &loop, consume);
         connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        connect(&poll, &QTimer::timeout, &loop, [&] { if (cancelled_ || !writeOk) reply->abort(); });
+        connect(&poll, &QTimer::timeout, &loop, [&] { if (cancelled_ || failed_ || !writeOk) reply->abort(); });
         poll.start();
         loop.exec();
         consume();
         const bool ok = !cancelled_ && writeOk && reply->error() == QNetworkReply::NoError &&
                         length == item.size && hash.result().toHex().compare(item.sha1.toLatin1(), Qt::CaseInsensitive) == 0;
-        const QString failure = QString("下载或校验失败 (%1/3): %2: %3").arg(attempt).arg(item.url, reply->errorString());
+        const QString reason = reply->error() != QNetworkReply::NoError ? reply->errorString() :
+            !writeOk ? "文件写入失败" : length != item.size ? "文件大小校验不匹配" : "SHA-1 校验不匹配";
+        const QString failure = QString("下载或校验失败 (%1/3): %2: %3").arg(attempt).arg(item.url, reason);
         reply->deleteLater();
         if (ok && output.commit()) {
             const int done = ++done_;
@@ -98,7 +164,7 @@ bool Installer::fetch(const Download &item, QNetworkAccessManager &network) {
         }
         {
             QMutexLocker lock(&errorMutex_);
-            if (error_.isEmpty()) error_ = ok ? "写入失败: " + item.path : failure;
+            if (attempt == 3 && error_.isEmpty()) error_ = ok ? "写入失败: " + item.path : failure;
         }
         output.cancelWriting();
         if (attempt < 3 && !cancelled_) QThread::msleep(300 * attempt);
@@ -109,7 +175,7 @@ bool Installer::fetch(const Download &item, QNetworkAccessManager &network) {
 bool Installer::fetchMetadata(QNetworkAccessManager &network, const QString &url, const QString &path, const QString &sha1) {
     QDir().mkpath(QFileInfo(path).absolutePath());
     if (!sha1.isEmpty() && valid({url, sha1, path, -1})) return true;
-    for (int attempt = 1; attempt <= 3 && !cancelled_; ++attempt) {
+    for (int attempt = 1; attempt <= 3 && !cancelled_ && !failed_; ++attempt) {
         QNetworkRequest request{QUrl(url)};
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         request.setTransferTimeout(30000);
@@ -128,6 +194,7 @@ bool Installer::fetchMetadata(QNetworkAccessManager &network, const QString &url
         if (ok) {
             QSaveFile output(path);
             if (!output.open(QIODevice::WriteOnly) || output.write(bytes) != bytes.size() || !output.commit()) { error_ = "元数据写入失败: " + path; return false; }
+            error_.clear();
             return true;
         }
         error_ = failure;
@@ -136,6 +203,8 @@ bool Installer::fetchMetadata(QNetworkAccessManager &network, const QString &url
     return false;
 }
 
+// 只接受有界、单卷且非加密/符号链接的 ZIP 条目；写入前检查相对路径、解压长度与 CRC。
+// 不信任归档文件名或中央目录中的偏移，避免越界读取和向实例外释放文件。
 bool Installer::extractNatives(const QString &archive, const QStringList &excludes, const QString &destination) {
     QFile file(archive);
     if (!file.open(QIODevice::ReadOnly) || file.size() > 100 * 1024 * 1024) { error_ = "无法读取 native ZIP: " + archive; return false; }
@@ -229,23 +298,7 @@ bool Installer::install(QNetworkAccessManager &network) {
     if (!assetFile.open(QIODevice::ReadOnly)) { error_ = "无法读取资源索引"; return false; }
     VersionPlan plan;
     if (!buildVersionPlan(json, root_, id_, QJsonDocument::fromJson(assetFile.readAll()).object(), plan, error_)) return false;
-    total_ = plan.files.size();
-    done_ = 0;
-    emit progress(0, total_, "开始下载 / 校验");
-    QThreadPool pool;
-    pool.setMaxThreadCount(16);
-    auto future = QtConcurrent::mappedReduced(
-        &pool, plan.files,
-        [this](const Download &item) {
-            QNetworkAccessManager manager;
-            const bool success = fetch(item, manager);
-            if (!success) failed_ = true;
-            return success;
-        },
-        [](bool &failures, bool succeeded) { failures = failures || !succeeded; },
-        QtConcurrent::UnorderedReduce | QtConcurrent::SequentialReduce);
-    future.waitForFinished();
-    if (future.result() || cancelled_ || failed_) return false;
+    if (!fetchFiles(plan.files)) return false;
     if (!plan.archives.isEmpty()) {
         if (!QDir().mkpath(plan.natives)) { error_ = "无法创建原生库目录"; return false; }
         for (const auto &archive : plan.archives)
@@ -254,5 +307,9 @@ bool Installer::install(QNetworkAccessManager &network) {
     const auto status = evaluatePlan(plan, &cancelled_);
     if (!status.ready()) { error_ = QString("安装后校验失败：缺失 %1，损坏 %2：%3")
         .arg(status.missing).arg(status.damaged).arg(status.examples.join(", ")); return false; }
+    result_.plan = plan;
+    result_.files = status;
+    result_.supported = result_.installed = !cancelled_;
+    result_.message = "可启动";
     return !cancelled_;
 }

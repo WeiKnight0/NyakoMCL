@@ -14,6 +14,7 @@
 #include <utility>
 
 namespace {
+// 尚不存在的目标也需解析最近存在祖先的真实路径，避免通过符号链接别名绕过实例目录重叠检查。
 QString resolvedPath(const QString &path) {
     QString absolute = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
     QStringList suffix;
@@ -68,7 +69,7 @@ bool writableDirectory(const QString &path, QString &error) {
         }
         probe = parent;
     }
-    QTemporaryFile file(QDir(probe).filePath(".pclqt-write-XXXXXX"));
+    QTemporaryFile file(QDir(probe).filePath(".nyakomcl-write-XXXXXX"));
     if (!file.open()) {
         error = "目标目录或其上级不可写：" + probe + "（" + file.errorString() + "）";
         return false;
@@ -78,16 +79,19 @@ bool writableDirectory(const QString &path, QString &error) {
 
 QJsonObject asJson(const InstanceRecord &record) {
     return {{"id", record.id}, {"name", record.name}, {"versionId", record.versionId},
-            {"directory", record.directory}, {"javaPath", record.javaPath}, {"pending", record.pending}};
+            {"directory", record.directory}, {"javaPath", record.javaPath}, {"pending", record.pending},
+            {"playerName", record.playerName}};
 }
 
 bool decode(const QJsonObject &object, InstanceRecord &record) {
     for (const char *key : {"id", "name", "versionId", "directory", "javaPath"})
         if (!object.value(QLatin1String(key)).isString()) return false;
-    if (!object.value("pending").isBool()) return false;
+    if (!object.value("pending").isBool() ||
+        (object.contains("playerName") && !object.value("playerName").isString())) return false;
     record = {object.value("id").toString(), object.value("name").toString(),
               object.value("versionId").toString(), object.value("directory").toString(),
-              object.value("javaPath").toString(), object.value("pending").toBool()};
+              object.value("javaPath").toString(), object.value("pending").toBool(),
+              object.value("playerName").toString("Player")};
     return true;
 }
 }
@@ -235,6 +239,7 @@ bool InstanceStore::commit(const QList<InstanceRecord> &records, const QString &
         error = "请先加载实例登记文件，避免覆盖已有数据";
         return false;
     }
+    // 先持久化候选快照，再提交内存状态；写盘失败不能留下界面已修改而登记未修改的状态。
     InstanceStore staged(*this);
     staged.instances_ = records;
     staged.selectedId_ = selectedId;
@@ -245,12 +250,12 @@ bool InstanceStore::commit(const QList<InstanceRecord> &records, const QString &
 }
 
 bool InstanceStore::add(QString name, QString versionId, QString directory, QString javaPath,
-                        QString &newId, QString &error) {
+                        QString &newId, QString &error, QString playerName) {
     error.clear();
     newId.clear();
     if (!loaded_) { error = "请先加载实例登记文件"; return false; }
     InstanceRecord record{QUuid::createUuid().toString(QUuid::WithoutBraces), std::move(name),
-                          std::move(versionId), std::move(directory), std::move(javaPath), true};
+                          std::move(versionId), std::move(directory), std::move(javaPath), true, std::move(playerName)};
     if (!validate(record, instances_, true, error)) return false;
     auto records = instances_;
     records.append(record);
