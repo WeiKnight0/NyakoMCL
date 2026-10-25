@@ -37,5 +37,5 @@ add_executable(NyakoMCL WIN32
 # 以 src 为私有包含根保持模块引用稳定；QML 资源别名保留模块入口 Main，不受磁盘目录布局影响。
 target_include_directories(NyakoMCL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set_source_files_properties(qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
-qt_add_qml_module(NyakoMCL URI NyakoMCL VERSION 1.0 QML_FILES qml/Main.qml)
+qt_add_qml_module(NyakoMCL URI NyakoMCL VERSION 1.0 OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}_QML" QML_FILES qml/Main.qml)
 target_link_libraries(NyakoMCL PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent ZLIB::ZLIB)
