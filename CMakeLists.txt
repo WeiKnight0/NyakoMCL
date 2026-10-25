@@ -36,6 +36,14 @@ add_executable(NyakoMCL WIN32
 )
 # 以 src 为私有包含根保持模块引用稳定；QML 资源别名保留模块入口 Main，不受磁盘目录布局影响。
 target_include_directories(NyakoMCL PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-set_source_files_properties(qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
-qt_add_qml_module(NyakoMCL URI NyakoMCL VERSION 1.0 QML_FILES qml/Main.qml)
+# 任务页与主页面一起打包，部署后仍可从任意来源进入内部任务导航。
+set(LAUNCHER_QML_FILES
+    qml/Main.qml qml/LaunchPage.qml qml/DownloadPage.qml qml/InstancesPage.qml
+    qml/SettingsPage.qml qml/InstanceSettingsWindow.qml qml/TasksPage.qml qml/TaskCard.qml
+    qml/ActionButton.qml qml/SectionTitle.qml qml/FieldTitle.qml)
+foreach(QML_FILE IN LISTS LAUNCHER_QML_FILES)
+    get_filename_component(QML_BASENAME "${QML_FILE}" NAME)
+    set_source_files_properties("${QML_FILE}" PROPERTIES QT_RESOURCE_ALIAS "${QML_BASENAME}")
+endforeach()
+qt_add_qml_module(NyakoMCL URI NyakoMCL VERSION 1.0 QML_FILES ${LAUNCHER_QML_FILES})
 target_link_libraries(NyakoMCL PRIVATE Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Concurrent ZLIB::ZLIB)

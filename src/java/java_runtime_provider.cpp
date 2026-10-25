@@ -35,7 +35,7 @@ JavaRuntime provideJava(const QJsonObject &version, const QString &root,
                         const std::function<bool(const QString &, const QString &, const QString &)> &metadata,
                         const std::function<bool(const QList<Download> &)> &files,
                         const std::atomic_bool &cancel, QString &error,
-                        const std::function<void(const QString &)> &stage) {
+                        const std::function<void(const QString &, const QString &)> &stage) {
     if (cancel) return {};
     const int major = version.value("majorVersion").toInt();
     if (major < 8 || major > 50) { error = QString("不支持的 Java major：%1，请手动选择兼容 Java").arg(major); return {}; }
@@ -43,6 +43,7 @@ JavaRuntime provideJava(const QJsonObject &version, const QString &root,
     // 暂存放在发布根目录内，使最后一次重命名无需跨卷；任何提前返回均由临时目录清理未发布内容。
     QTemporaryDir staging(QDir(root).filePath(".staging-XXXXXX"));
     if (!staging.isValid()) { error = "无法创建 Java 暂存目录"; return {}; }
+    if (stage) stage("java-index", "获取 Java 目录");
     const QString indexPath = staging.filePath("index.json");
     if (!metadata("https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json", indexPath, {})) return {};
     const QString component = version.value("component").toString();
@@ -55,6 +56,7 @@ JavaRuntime provideJava(const QJsonObject &version, const QString &root,
     const Download manifest{descriptor.value("url").toString(), descriptor.value("sha1").toString(), manifestPath,
                             qint64(descriptor.value("size").toDouble(-1))};
     if (!validDownload(manifest)) { error = "官方 Java manifest 描述无效"; return {}; }
+    if (stage) stage("java-manifest", "获取 Java 文件清单");
     if (!files({manifest})) return {};
     const QString payload = staging.filePath("payload");
     const auto entriesByPath = read(manifestPath).value("files").toObject();
@@ -85,7 +87,9 @@ JavaRuntime provideJava(const QJsonObject &version, const QString &root,
         } else { error = "不支持的 Java manifest 类型：" + type; return {}; }
     }
     if (downloads.isEmpty()) { error = "官方 Java manifest 没有文件"; return {}; }
+    if (stage) stage("java-files", "下载官方 Java 文件");
     if (!files(downloads)) return {};
+    if (stage) stage("java-verify", "检查 Java 运行时");
     for (const auto &path : executables)
         if (!QFile::setPermissions(path, QFile::permissions(path) | QFile::ExeOwner | QFile::ExeGroup | QFile::ExeOther)) {
             error = "无法设置 Java 可执行权限：" + path; return {};
@@ -104,7 +108,7 @@ JavaRuntime provideJava(const QJsonObject &version, const QString &root,
         if (existing.compatible(runtime.major)) return existing;
         error = "已发布 Java 运行时损坏，请移除后重试：" + destination; return {};
     }
-    if (stage) stage("发布官方 Java");
+    if (stage) stage("java-publish", "发布官方 Java");
     if (cancel) return {};
     if (!QDir().rename(payload, destination)) { error = "无法发布 Java 运行时：" + destination; return {}; }
     return inspectJava(executable(destination), &cancel);
