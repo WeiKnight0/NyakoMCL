@@ -10,10 +10,10 @@
  * @param root 应用管理的运行时目录，不是实例目录。
  * @param metadata 在当前工作线程下载元数据的回调；files 校验并下载文件批次的回调。
  * @param cancel 协作取消标记；error 接收失败原因，取消时可能保持原值。
- * @param stage 发布前在调用线程报告阶段的可选回调。
+ * @param stage 在真实业务节点报告稳定阶段 ID 与中文名称的可选回调。
  * @throws 无主动异常；失败或取消返回无效运行时，回调异常不在此捕获。 */
 JavaRuntime provideJava(const QJsonObject &version, const QString &root,
                         const std::function<bool(const QString &, const QString &, const QString &)> &metadata,
                         const std::function<bool(const QList<Download> &)> &files,
                         const std::atomic_bool &cancel, QString &error,
-                        const std::function<void(const QString &)> &stage = {});
+                        const std::function<void(const QString &, const QString &)> &stage = {});

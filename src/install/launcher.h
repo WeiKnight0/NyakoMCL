@@ -6,6 +6,7 @@
 #include <QNetworkAccessManager>
 #include <QThread>
 #include <QStringList>
+#include <QVariantMap>
 #include <atomic>
 
 /** @description 在工作线程安装原版或准备冻结的离线启动输入，不在该线程启动游戏。
@@ -50,6 +51,10 @@ public:
      * @param 无；应在启动准备成功并 finished 后读取。
      * @throws 无主动异常。 */
     QStringList arguments() const { return arguments_; }
+    /** @description 在互斥锁内读取真实业务阶段与响应体累计量，供主线程低频采样。
+     * @param 无；可在工作线程运行期间调用。
+     * @throws 无主动异常。 */
+    QVariantMap taskSnapshot() const;
 signals:
     /** @description 从工作线程或下载池报告进度，界面接收方应排队处理。
      * @param done 已完成数量；total 总数，零表示阶段未定量；detail 当前阶段或文件。
@@ -67,6 +72,13 @@ private:
     bool install(QNetworkAccessManager &network);
     bool valid(const Download &item) const;
     bool extractNatives(const QString &archive, const QStringList &excludes, const QString &destination);
+    void beginStage(const QString &id, const QString &label, int total = 0);
+    void updateTask(int done, int total, const QString &detail);
+    void received(qint64 bytes);
+    void retry(const QString &file, int attempt);
+    mutable QMutex taskMutex_;
+    QVariantMap snapshot_;
+    QVariantList stages_;
     QString root_, id_;
     std::atomic_bool cancelled_{false};
     std::atomic_bool failed_{false};
